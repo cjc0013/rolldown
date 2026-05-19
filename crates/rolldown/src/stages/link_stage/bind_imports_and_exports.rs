@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use arcstr::ArcStr;
 use indexmap::IndexSet;
-use oxc::span::CompactStr;
+use oxc_str::CompactStr;
 // TODO: The current implementation for matching imports is enough so far but incomplete. It needs to be refactored
 // if we want more enhancements related to exports.
 use rolldown_common::{
@@ -12,6 +12,8 @@ use rolldown_common::{
   SymbolRefFlags,
 };
 use rolldown_error::{AmbiguousExternalNamespaceModule, BuildDiagnostic};
+#[cfg(not(target_family = "wasm"))]
+use rolldown_utils::rayon::IndexedParallelIterator;
 use rolldown_utils::{
   ecmascript::{is_validate_identifier_name, legitimize_identifier_name},
   index_vec_ext::{IndexVecExt, IndexVecRefExt},
@@ -403,12 +405,13 @@ impl LinkStage<'_> {
       .module_table
       .modules
       .par_iter()
-      .map(|module| match module {
+      .zip(self.stmt_infos.par_iter())
+      .map(|(module, stmt_infos)| match module {
         Module::Normal(module) => {
           let mut resolved_map = FxHashMap::default();
           let mut side_effects_dependency = vec![];
           let mut written_cjs_exports: Vec<SymbolRef> = vec![];
-          module.stmt_infos.iter().for_each(|stmt_info| {
+          stmt_infos.iter().for_each(|stmt_info| {
             stmt_info.referenced_symbols.iter().for_each(|symbol_ref| {
               // `depended_refs` is used to store necessary symbols that must be included once the resolved symbol gets included
               let mut depended_refs: Vec<SymbolRef> = vec![];
@@ -855,7 +858,7 @@ impl BindImportsAndExportsContext<'_> {
               importee.as_normal().map(|m| &m.module_type),
               Some(ModuleType::Ts | ModuleType::Tsx)
             ) && matches!(module.module_type, ModuleType::Ts | ModuleType::Tsx);
-          let mut diagnostic = BuildDiagnostic::missing_export(
+          let diagnostic = BuildDiagnostic::missing_export(
             module.id.to_string(),
             module.stable_id.to_string(),
             importee.id().to_string(),
@@ -865,12 +868,7 @@ impl BindImportsAndExportsContext<'_> {
             named_import.span_imported,
             is_ts_like_importing_ts_like.then(|| format!("If you meant to import a type rather than a value, make sure to add the `type` modifier (e.g. `import {{ type Foo }} from '{}'`).", rec.module_request))
           );
-          if is_ts_like_importing_ts_like {
-            diagnostic = diagnostic.with_severity_warning();
-            self.warnings.push(diagnostic);
-          } else {
-            self.errors.push(diagnostic);
-          }
+          self.errors.push(diagnostic);
         }
       }
     }
@@ -1064,8 +1062,12 @@ impl BindImportsAndExportsContext<'_> {
 
           break MatchImportKind::Normal(MatchImportKindNormal { symbol, reexports });
         }
-        ImportStatus::_CommonJSWithoutExports => todo!(),
-        ImportStatus::_Disabled => todo!(),
+        ImportStatus::_CommonJSWithoutExports => {
+          panic!("`ImportStatus::_CommonJSWithoutExports` is not implemented yet")
+        }
+        ImportStatus::_Disabled => {
+          panic!("`ImportStatus::_Disabled` is not implemented yet")
+        }
         ImportStatus::External(symbol_ref) => {
           if self.options.format.keep_esm_import_export_syntax() {
             // Imports from external modules should not be converted to CommonJS

@@ -1,8 +1,7 @@
 use itertools::Itertools;
 use oxc::allocator::FromIn;
 use oxc::ast::AstType;
-use oxc::ast::ast::{AssignmentTarget, JSXMemberExpression};
-use oxc::span::{CompactStr, Str};
+use oxc::ast::ast::{AssignmentTarget, JSXMemberExpression, Str};
 use oxc::{
   allocator::{self, Dummy as _, IntoIn, TakeIn},
   ast::{
@@ -14,9 +13,10 @@ use oxc::{
   semantic::ScopeFlags,
   span::{SPAN, Span},
 };
+use oxc_str::CompactStr;
 use rolldown_common::{ConcatenateWrappedModuleKind, SymbolRef, ThisExprReplaceKind, WrapKind};
 use rolldown_ecmascript::ToSourceString;
-use rolldown_ecmascript_utils::{ExpressionExt, JsxExt};
+use rolldown_ecmascript_utils::{ExpressionExt, JsxExt, JsxMemberExpressionObjectExt};
 
 use crate::hmr::utils::HmrAstBuilder;
 use crate::module_finalizers::{KeepNameId, TraverseState};
@@ -128,10 +128,9 @@ impl<'ast> VisitMut<'ast> for ScopeHoistingFinalizer<'_, 'ast> {
       self.ctx.linking_info.shimmed_missing_exports.iter().collect::<Vec<_>>();
     shimmed_exports.sort_unstable_by_key(|(name, _)| name.as_str());
     shimmed_exports.into_iter().for_each(|(_name, symbol_ref)| {
-      debug_assert!(!self.ctx.module.stmt_infos.declared_stmts_by_symbol(symbol_ref).is_empty());
+      debug_assert!(!self.ctx.stmt_infos.declared_stmts_by_symbol(symbol_ref).is_empty());
       let is_included: bool = self
         .ctx
-        .module
         .stmt_infos
         .declared_stmts_by_symbol(symbol_ref)
         .iter()
@@ -426,7 +425,7 @@ impl<'ast> VisitMut<'ast> for ScopeHoistingFinalizer<'_, 'ast> {
             .and_then(|ref_id| self.scope.scoping().get_reference(ref_id).symbol_id())
             .map(|id| {
               let symbol_ref = self.ctx.symbol_db.canonical_ref_for((self.ctx.idx, id).into());
-              self.ctx.side_effect_free_function_symbols.contains(&symbol_ref)
+              symbol_ref.is_side_effect_free_function(self.ctx.symbol_db, self.ctx.modules)
                 && symbol_ref.is_not_reassigned(self.ctx.symbol_db) == Some(true)
             })
             .unwrap_or(false);
@@ -483,7 +482,20 @@ impl<'ast> VisitMut<'ast> for ScopeHoistingFinalizer<'_, 'ast> {
           *expr = self.snippet.builder.expression_object(SPAN, self.snippet.builder.vec());
         }
       }
-      ast::Expression::ChainExpression(chain_expr) => {
+      ast::Expression::ChainExpression(_) => {
+        // Try inline as enum access first (`E?.x` → literal). Enum bindings are
+        // always defined (the IIFE produces `{}`, never null/undefined), so `?.`
+        // is equivalent to `.` here.
+        if self.ctx.has_enum_inlining
+          && let Some(new_expr) = self.try_inline_enum_access(expr)
+        {
+          *expr = new_expr;
+          self.rewrite_import_meta_hot(expr);
+          walk_mut::walk_expression(self, expr);
+          return;
+        }
+
+        let ast::Expression::ChainExpression(chain_expr) = expr else { unreachable!() };
         let chain_span = chain_expr.span;
         if let Some(new_expr) = chain_expr
           .expression
@@ -516,10 +528,26 @@ impl<'ast> VisitMut<'ast> for ScopeHoistingFinalizer<'_, 'ast> {
         }
       }
       _ => {
+        // Try to inline enum member accesses (e.g., `Direction.Up` → `0`, `ns.c.x` → `"c"`)
+        if self.ctx.has_enum_inlining {
+          if let Some(new_expr) = self.try_inline_enum_access(expr) {
+            *expr = new_expr;
+            self.rewrite_import_meta_hot(expr);
+            walk_mut::walk_expression(self, expr);
+            return;
+          }
+        }
         if let Some(new_expr) =
           expr.as_member_expression().and_then(|expr| self.try_rewrite_member_expr(expr))
         {
           *expr = new_expr;
+          // After namespace rewriting (e.g., `ns.c` → `c`), the result may be
+          // an enum member access that can be inlined.
+          if self.ctx.has_enum_inlining {
+            if let Some(inlined) = self.try_inline_enum_access(expr) {
+              *expr = inlined;
+            }
+          }
         }
       }
     }

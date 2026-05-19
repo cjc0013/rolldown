@@ -19,8 +19,6 @@ export const failedReasons: Record<string, string> = {
   'default/external_es6_converted_to_common_js': 'sub optimal: redundant `import` statements',
   'default/false_require': 'should rename `require` when it is appear in param position',
   'default/jsx_dev_self_edge_cases': 'https://github.com/oxc-project/oxc/issues/16654',
-  'default/legal_comments_inline':
-    'legal comments are not kept properly (https://github.com/rolldown/rolldown/issues/7387)',
   'default/mangle_props_import_export':
     "sub optimal: for `__require` diff, we don't have ModePassThrough",
   'default/no_warn_common_js_exports_in_esm_pass_through':
@@ -41,6 +39,8 @@ export const failedReasons: Record<string, string> = {
     'ignored module debug name seems not correct',
   'ts/ts_export_default_type_issue316':
     'related to https://github.com/rolldown/rolldown/issues/3048, export pointing to a value declared by `declare var` should be kept',
+  'ts/ts_print_non_finite_number_inside_with':
+    'with statement is rejected due to https://github.com/rolldown/rolldown/issues/7009',
 };
 
 export const notSupportedReasons: Record<string, string> = {
@@ -82,24 +82,6 @@ export const notSupportedReasons: Record<string, string> = {
     "`legalComments: 'eof'` is not supported",
   'default/legal_comments_none': "`legalComments: 'none'` is not supported for CSS files",
 
-  'ts/enum_rules_from_type_script_5_0': 'const enum inline is not supported',
-  'ts/ts_const_enum_comments': 'const enum inline is not supported',
-  'ts/ts_enum_cross_module_inlining_access': 'enum inline is not supported',
-  'ts/ts_enum_cross_module_inlining_definitions': 'enum inline is not supported',
-  'ts/ts_enum_cross_module_inlining_minify_index_into_dot': 'const enum inline is not supported',
-  'ts/ts_enum_cross_module_inlining_re_export': 'enum inline is not supported',
-  'ts/ts_enum_cross_module_tree_shaking': 'enum inline is not supported',
-  'ts/ts_enum_export_clause': 'enum inline is not supported',
-  'ts/ts_enum_jsx': 'enum inline is not supported',
-  'ts/ts_enum_same_module_inlining_access': 'enum inline is not supported',
-  'ts/ts_enum_tree_shaking': 'enum inline is not supported',
-  'ts/ts_enum_use_before_declare': 'enum inline is not supported',
-  'ts/ts_minify_enum_cross_file_inline_strings_into_templates': 'enum inline is not supported',
-  'ts/ts_minify_enum_property_names': 'enum inline is not supported',
-  'ts/ts_print_non_finite_number_inside_with':
-    'with statement is rejected due to https://github.com/rolldown/rolldown/issues/7009 and enum inline is not supported',
-  'ts/ts_sibling_enum': 'enum inline is not supported',
-
   'default/metafile_various_cases': 'copy loader is not supported',
   'default/metafile_very_long_external_paths': 'copy loader is not supported',
   'loader/loader_bundle_with_unknown_import_attributes_and_copy_loader':
@@ -130,6 +112,7 @@ export const notSupportedReasons: Record<string, string> = {
   'glob/ts_glob_basic_splitting': 'glob is not supported',
   'default/require_and_dynamic_import_invalid_template': 'glob is not supported',
   'loader/with_type_bytes_override_loader_glob': 'glob is not supported',
+  'loader/with_type_text_override_loader_glob': 'glob is not supported',
 
   'loader/loader_file_public_path_js': 'publicPath equivalent option is not supported',
   'loader/loader_file_public_path_css': 'publicPath equivalent option is not supported',
@@ -150,6 +133,7 @@ export const notSupportedReasons: Record<string, string> = {
   'loader/with_bad_attribute': 'import attributes is not supported',
   'loader/with_bad_type': 'import attributes is not supported',
   'loader/with_type_bytes_override_loader': 'import attributes is not supported',
+  'loader/with_type_text_override_loader': 'import attributes is not supported',
   'loader/with_type_json_override_loader': 'import attributes is not supported',
 
   'default/conditional_require_resolve':
@@ -242,6 +226,8 @@ export const ignoreReasons: Record<string, string> = {
   'default/legal_comments_modify_indent':
     'CSS bundling is not supported (https://github.com/rolldown/rolldown/issues/4271)',
   'default/metafile_no_bundle':
+    'CSS bundling is not supported (https://github.com/rolldown/rolldown/issues/4271)',
+  'loader/loader_data_url_hash_suffix_issue4370':
     'CSS bundling is not supported (https://github.com/rolldown/rolldown/issues/4271)',
   'loader/loader_data_url_text_css':
     'CSS bundling is not supported (https://github.com/rolldown/rolldown/issues/4271)',

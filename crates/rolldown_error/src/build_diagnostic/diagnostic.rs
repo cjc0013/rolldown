@@ -117,6 +117,7 @@ impl Diagnostic {
     let mut message = self.title.clone();
     let mut builder = AriadneReport::build(
       match self.severity {
+        Severity::Info => ReportKind::Advice,
         Severity::Error => ReportKind::Error,
         Severity::Warning => ReportKind::Warning,
       },
@@ -134,7 +135,7 @@ impl Diagnostic {
           span.source(),
           span.start()..span.end()
         )
-        .expect("Failed to write report message");
+        .ok();
       } else {
         builder = builder.with_label(label);
       }
@@ -154,12 +155,19 @@ impl Diagnostic {
   pub fn convert_to_string(&self, color: bool) -> String {
     let builder = self.init_report_builder();
     let mut output = Vec::new();
-    builder
-      .with_config(Config::default().with_color(color).with_index_type(ariadne::IndexType::Byte))
+    let result = builder
+      .with_config(
+        Config::default()
+          .with_color(color)
+          .with_index_type(ariadne::IndexType::Byte)
+          .with_severity_prefix(false),
+      )
       .finish()
-      .write_for_stdout(sources(self.files.clone()), &mut output)
-      .unwrap();
-    String::from_utf8(output).expect("Diagnostic should be valid utf8")
+      .write_for_stdout(sources(self.files.clone()), &mut output);
+    match result {
+      Ok(()) => String::from_utf8_lossy(&output).into_owned(),
+      Err(_) => format!("[{}] {}", self.kind, self.title),
+    }
   }
 
   pub fn to_color_string(&self) -> String {
@@ -200,6 +208,10 @@ impl Diagnostic {
 
     let file = span.source().to_string();
     Some((file, line, column, utf16_pos))
+  }
+
+  pub fn kind(&self) -> String {
+    self.kind.clone()
   }
 }
 

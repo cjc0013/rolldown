@@ -10,7 +10,8 @@ use rolldown_common::{
   StrOrBytes, try_extract_lazy_barrel_info,
 };
 use rolldown_error::{
-  BuildDiagnostic, BuildResult, UnloadableDependencyContext, downcast_napi_error_diagnostics,
+  BuildDiagnostic, BuildResult, DiagnosticOptions, EventKindSwitcher, UnloadableDependencyContext,
+  downcast_napi_error_diagnostics,
 };
 use rolldown_std_utils::PathExt as _;
 use rolldown_utils::{ecmascript::legitimize_identifier_name, indexmap::FxIndexSet};
@@ -85,7 +86,6 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
         .ctx
         .tx
         .send(ModuleLoaderMsg::BuildErrors(errs.into_vec().into_boxed_slice()))
-        .await
         .expect("ModuleLoader: failed to send build errors - main thread terminated while processing module errors");
     }
   }
@@ -183,6 +183,34 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
       None
     };
 
+    // Eagerly resolving every import in a giant barrel is a known bottleneck.
+    // The threshold targets only the real outliers (large icon packs); normal
+    // component and utility barrels stay well below it.
+    if barrel_info.is_some()
+      && self.ctx.options.checks.contains(EventKindSwitcher::LargeBarrelModules)
+    {
+      const LARGE_BARREL_IMPORT_THRESHOLD: usize = 5000;
+      let import_record_count = raw_import_records.len();
+      if import_record_count > LARGE_BARREL_IMPORT_THRESHOLD {
+        if let Some(on_log) = self.ctx.options.on_log.as_ref() {
+          let event = BuildDiagnostic::large_barrel_modules(id.to_string(), import_record_count)
+            .with_severity(rolldown_error::Severity::Info)
+            .to_diagnostic_with(&DiagnosticOptions { cwd: self.ctx.options.cwd.clone() });
+          on_log
+            .call(
+              rolldown_common::LogLevel::Info,
+              rolldown_common::Log {
+                message: event.to_color_string(),
+                id: Some(id.to_string()),
+                code: Some(event.kind()),
+                ..Default::default()
+              },
+            )
+            .await?;
+        }
+      }
+    }
+
     let module = NormalModule {
       repr_name,
       stable_id,
@@ -211,7 +239,7 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
       tla_keyword_span,
     }));
 
-    self.ctx.tx.send(result).await.expect(
+    self.ctx.tx.send(result).expect(
       "ModuleLoader channel closed while sending module completion - main thread terminated unexpectedly"
     );
 

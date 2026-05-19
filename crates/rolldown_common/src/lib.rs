@@ -17,9 +17,7 @@ mod utils;
 pub mod bundler_options {
   pub use crate::generated::{
     checks_options::ChecksOptions,
-    runtime_helper::{
-      DependedRuntimeHelperMap, DependedRuntimeHelperMapExt, RUNTIME_HELPER_NAMES, RuntimeHelper,
-    },
+    runtime_helper::{DependedRuntimeHelperMap, RUNTIME_HELPER_NAMES, RuntimeHelper},
   };
 
   #[cfg(feature = "deserialize_bundler_options")]
@@ -36,7 +34,9 @@ pub mod bundler_options {
       dev_mode_options::DevModeOptions,
       devtools_options::DevtoolsOptions,
       es_module_flag::EsModuleFlag,
-      experimental_options::ExperimentalOptions,
+      experimental_options::{
+        ChunkOptimizationOption, ChunkOptimizationOptions, ExperimentalOptions,
+      },
       filename_template::{FilenameTemplate, is_path_fragment},
       generated_code_options::GeneratedCodeOptions,
       hash_characters::HashCharacters,
@@ -216,6 +216,7 @@ pub use crate::{
   types::symbol_ref_db::{
     GetLocalDb, GetLocalDbMut, SymbolRefDb, SymbolRefDbForModule, SymbolRefFlags,
   },
+  types::used_symbol_refs::UsedSymbolRefs,
   types::watch::WatcherChangeKind,
   types::wrap_kind::WrapKind,
 };

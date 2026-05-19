@@ -1,8 +1,8 @@
 use std::{ops::Deref, pin::Pin, sync::Arc};
 
 use futures::future::try_join_all;
-use oxc::span::CompactStr;
 use oxc_index::{IndexVec, index_vec};
+use oxc_str::CompactStr;
 use rolldown_common::{
   Asset, ChunkIdx, ConcatenateWrappedModuleKind, EmittedChunkInfo, InstantiationKind,
   ModuleRenderArgs, ModuleRenderOutput, Output, OutputAsset, OutputChunk, SharedFileEmitter,
@@ -47,6 +47,8 @@ impl GenerateStage<'_> {
     let mut warnings = std::mem::take(&mut self.link_output.warnings);
     let (mut instantiated_chunks, index_chunk_to_instances) =
       self.instantiate_chunks(chunk_graph, &mut errors, &mut warnings).await?;
+
+    self.trace_action_package_graph_ready(chunk_graph, &instantiated_chunks);
 
     render_chunks(self.plugin_driver, &mut instantiated_chunks, self.options).await?;
 

@@ -62,7 +62,7 @@ impl BundlingTask {
     if let Err(err) = &task_run_result {
       tracing::error!("[BundlingTask] fails to run");
       // FIXME: Should handle the error properly.
-      eprintln!("Bundling task run with error: {err}"); // FIXME: handle this error
+      tracing::error!("Bundling task run with error: {err}"); // FIXME: handle this error
     }
 
     let has_generated_bundle_output = self.has_rebuild_happen;
@@ -121,6 +121,7 @@ impl BundlingTask {
     Ok(())
   }
 
+  #[tracing::instrument(level = "trace", skip(self))]
   pub async fn generate_hmr_updates(
     &mut self,
     has_full_reload_update: &mut bool,
@@ -184,6 +185,7 @@ impl BundlingTask {
     }
   }
 
+  #[tracing::instrument(level = "trace", skip_all)]
   async fn rebuild(&mut self) -> BuildResult<()> {
     let mut bundler = self.bundler.lock().await;
 

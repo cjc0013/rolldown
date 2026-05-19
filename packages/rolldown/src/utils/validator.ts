@@ -194,6 +194,8 @@ const TypescriptSchema = v.object({
   allowNamespaces: v.optional(v.boolean()),
   allowDeclareFields: v.optional(v.boolean()),
   removeClassFieldsWithoutInitializer: v.optional(v.boolean()),
+  optimizeConstEnums: v.optional(v.boolean()),
+  optimizeEnums: v.optional(v.boolean()),
   declaration: v.optional(
     v.object({
       stripInternal: v.optional(v.boolean()),
@@ -330,6 +332,12 @@ const ChecksOptionsSchema = v.strictObject({
     v.optional(v.boolean()),
     v.description('Whether to emit warnings when the `output.name` option is missing when needed'),
   ),
+  invalidAnnotation: v.pipe(
+    v.optional(v.boolean()),
+    v.description(
+      'Whether to emit warnings when a `#__PURE__` / `@__PURE__` annotation has no effect due to its position',
+    ),
+  ),
   mixedExports: v.pipe(
     v.optional(v.boolean()),
     v.description('Whether to emit warnings when the way to export values is ambiguous'),
@@ -408,6 +416,12 @@ const ChecksOptionsSchema = v.strictObject({
       'Whether to emit warnings when a module is dynamically imported but also statically imported, making the dynamic import ineffective for code splitting',
     ),
   ),
+  largeBarrelModules: v.pipe(
+    v.optional(v.boolean()),
+    v.description(
+      'Whether to emit info logs when a barrel module has a very large number of re-exports (more than 5000)',
+    ),
+  ),
 });
 isTypeTrue<IsSchemaSubType<typeof ChecksOptionsSchema, ChecksOptions>>();
 
@@ -421,6 +435,7 @@ const CompressTreeshakeOptionsSchema = v.strictObject({
   annotations: v.optional(v.boolean()),
   manualPureFunctions: v.optional(v.array(v.string())),
   propertyReadSideEffects: v.optional(v.union([v.boolean(), v.literal('always')])),
+  propertyWriteSideEffects: v.optional(v.boolean()),
   unknownGlobalSideEffects: v.optional(v.boolean()),
   invalidImportSideEffects: v.optional(v.boolean()),
 });
@@ -627,7 +642,15 @@ const InputOptionsSchema = v.strictObject({
       onDemandWrapping: v.optional(v.boolean()),
       incrementalBuild: v.optional(v.boolean()),
       nativeMagicString: v.optional(v.boolean()),
-      chunkOptimization: v.optional(v.boolean()),
+      chunkOptimization: v.optional(
+        v.union([
+          v.boolean(),
+          v.strictObject({
+            mergeCommonChunks: v.optional(v.boolean()),
+            avoidRedundantChunkLoads: v.optional(v.boolean()),
+          }),
+        ]),
+      ),
       lazyBarrel: v.optional(v.boolean()),
     }),
   ),

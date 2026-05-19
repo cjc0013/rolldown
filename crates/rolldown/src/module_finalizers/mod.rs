@@ -26,7 +26,7 @@ use rolldown_ecmascript_utils::{
 mod finalizer_context;
 mod impl_visit_mut;
 pub use finalizer_context::ScopeHoistingFinalizerContext;
-use oxc::span::{CompactStr, Ident};
+use oxc_str::{CompactStr, Ident};
 use rolldown_utils::ecmascript::is_validate_identifier_name;
 use rolldown_utils::indexmap::{FxIndexMap, FxIndexSet};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -179,6 +179,138 @@ impl<'me, 'ast> ScopeHoistingFinalizer<'me, 'ast> {
     }
   }
 
+  fn collect_wrapped_esm_init_modules_for_import_record(
+    &self,
+    rec_idx: ImportRecordIdx,
+  ) -> FxIndexSet<ModuleIdx> {
+    // See meta/design/linking/reference-needed-symbols.md for why this follows
+    // canonical owners through non-wrapped barrel modules.
+    let mut init_modules = FxIndexSet::default();
+    let rec = &self.ctx.module.import_records[rec_idx];
+    let Some(importee_idx) = rec.resolved_module else { return init_modules };
+    let importee_linking_info = &self.ctx.linking_infos[importee_idx];
+
+    if rec.meta.contains(ImportRecordMeta::IsExportStar) {
+      for resolved_export in importee_linking_info.resolved_exports.values() {
+        self.add_wrapped_esm_init_module_for_symbol(resolved_export.symbol_ref, &mut init_modules);
+      }
+      return init_modules;
+    }
+
+    for named_import in
+      self.ctx.module.named_imports.values().filter(|item| item.record_idx == rec_idx)
+    {
+      match &named_import.imported {
+        Specifier::Star => {
+          for resolved_export in importee_linking_info.resolved_exports.values() {
+            self.add_wrapped_esm_init_module_for_symbol(
+              resolved_export.symbol_ref,
+              &mut init_modules,
+            );
+          }
+        }
+        Specifier::Literal(name) => {
+          if let Some(resolved_export) = importee_linking_info.resolved_exports.get(name) {
+            self.add_wrapped_esm_init_module_for_symbol(
+              resolved_export.symbol_ref,
+              &mut init_modules,
+            );
+          } else {
+            self
+              .add_wrapped_esm_init_module_for_symbol(named_import.imported_as, &mut init_modules);
+          }
+        }
+      }
+    }
+
+    init_modules
+  }
+
+  fn add_wrapped_esm_init_module_for_symbol(
+    &self,
+    symbol_ref: SymbolRef,
+    init_modules: &mut FxIndexSet<ModuleIdx>,
+  ) {
+    let canonical_ref = self.ctx.symbol_db.canonical_ref_resolving_namespace(symbol_ref);
+    let meta = &self.ctx.linking_infos[canonical_ref.owner];
+    if matches!(meta.wrap_kind(), WrapKind::Esm)
+      && meta.wrapper_ref.is_some()
+      && !matches!(meta.concatenated_wrapped_module_kind, ConcatenateWrappedModuleKind::Inner)
+    {
+      init_modules.insert(canonical_ref.owner);
+    }
+  }
+
+  fn wrapped_esm_init_stmt_for_import_record(
+    &mut self,
+    rec_idx: ImportRecordIdx,
+  ) -> Option<Statement<'ast>> {
+    let rec = &self.ctx.module.import_records[rec_idx];
+    // If the non-wrapped forwarding module is emitted in this chunk, its own
+    // lowered statement already preserves the required init call in execution
+    // order. This fallback is only for barrels that do not execute here.
+    if rec.resolved_module.is_some_and(|importee_idx| {
+      let importee_linking_info = &self.ctx.linking_infos[importee_idx];
+      matches!(importee_linking_info.wrap_kind(), WrapKind::None)
+        && importee_linking_info.is_included
+        && self.ctx.chunk_graph.module_to_chunk[importee_idx] == Some(self.ctx.chunk_idx)
+    }) {
+      return None;
+    }
+
+    let init_modules = self
+      .collect_wrapped_esm_init_modules_for_import_record(rec_idx)
+      .into_iter()
+      .collect::<Vec<_>>();
+    if init_modules.is_empty() {
+      return None;
+    }
+
+    let init_exprs = init_modules.into_iter().filter_map(|module_idx| {
+      if !self.generated_init_esm_importee_ids.insert(module_idx) {
+        return None;
+      }
+
+      let importee_linking_info = &self.ctx.linking_infos[module_idx];
+      let wrapper_ref = importee_linking_info.wrapper_ref?;
+      let is_tla_or_contains_tla_dependency =
+        importee_linking_info.is_tla_or_contains_tla_dependency;
+      let (wrapper_ref_expr, _) = self.finalized_expr_for_symbol_ref(wrapper_ref, false, false);
+
+      let init_call = ast::Expression::CallExpression(self.snippet.builder.alloc_call_expression(
+        SPAN,
+        wrapper_ref_expr,
+        NONE,
+        self.snippet.builder.vec(),
+        false,
+      ));
+
+      Some(if is_tla_or_contains_tla_dependency {
+        ast::Expression::AwaitExpression(
+          self.snippet.builder.alloc_await_expression(SPAN, init_call),
+        )
+      } else {
+        init_call
+      })
+    });
+
+    let init_exprs = init_exprs.collect::<Vec<_>>();
+    match init_exprs.len() {
+      0 => None,
+      1 => init_exprs
+        .into_iter()
+        .next()
+        .map(|init_expr| self.snippet.builder.statement_expression(SPAN, init_expr)),
+      _ => {
+        let builder = self.builder();
+        Some(builder.statement_expression(
+          SPAN,
+          builder.expression_sequence(SPAN, builder.vec_from_iter(init_exprs)),
+        ))
+      }
+    }
+  }
+
   /// If return true the import stmt should be removed,
   /// or transform the import stmt to target form.
   fn transform_or_remove_import_export_stmt(
@@ -194,6 +326,10 @@ impl<'me, 'ast> ScopeHoistingFinalizer<'me, 'ast> {
     let importee_linking_info = &self.ctx.linking_infos[importee.idx];
     match importee_linking_info.wrap_kind() {
       WrapKind::None => {
+        if let Some(init_stmt) = self.wrapped_esm_init_stmt_for_import_record(rec_idx) {
+          *stmt = init_stmt;
+          return false;
+        }
         // Remove this statement by ignoring it
       }
       WrapKind::Cjs => {
@@ -369,16 +505,12 @@ impl<'me, 'ast> ScopeHoistingFinalizer<'me, 'ast> {
     } else {
       match self.ctx.options.format {
         rolldown_common::OutputFormat::Cjs => {
-          let chunk_idx_of_canonical_symbol =
-            canonical_symbol.chunk_idx.unwrap_or_else(|| {
-              // Scoped symbols don't get assigned a `ChunkIdx`. There are skipped for performance reason, because they are surely
-              // belong to the chunk they are declared in and won't link to other chunks.
-              let symbol_name = canonical_ref.name(self.ctx.symbol_db);
-              eprintln!(
-                "{canonical_ref:?} {symbol_name:?} is not in any chunk, which is unexpected",
-              );
-              panic!("{canonical_ref:?} {symbol_name:?} is not in any chunk, which is unexpected");
-            });
+          let chunk_idx_of_canonical_symbol = canonical_symbol.chunk_idx.unwrap_or_else(|| {
+            // Scoped symbols don't get assigned a `ChunkIdx`. There are skipped for performance reason, because they are surely
+            // belong to the chunk they are declared in and won't link to other chunks.
+            let symbol_name = canonical_ref.name(self.ctx.symbol_db);
+            panic!("{canonical_ref:?} {symbol_name:?} is not in any chunk, which is unexpected");
+          });
           let cur_chunk_idx = self.ctx.chunk_graph.module_to_chunk[self.ctx.idx]
             .expect("This module should be in a chunk");
           let is_symbol_in_other_chunk = cur_chunk_idx != chunk_idx_of_canonical_symbol;
@@ -534,6 +666,108 @@ impl<'me, 'ast> ScopeHoistingFinalizer<'me, 'ast> {
     ))
   }
 
+  /// Try to inline an enum member access from an expression. Handles:
+  /// - `Direction.Up` (static member with identifier object)
+  /// - `ns.Direction.Up` (chained static member via namespace import)
+  /// - `Direction["Up"]` (computed member with string literal key)
+  /// - `Direction?.Up` / `Direction?.["Up"]` (optional chain — enum bindings
+  ///   are always defined, so `?.` is equivalent to `.`)
+  fn try_inline_enum_access(&self, expr: &ast::Expression<'_>) -> Option<ast::Expression<'ast>> {
+    let member = expr.get_member_expr()?;
+    let (object, property_name) = match member {
+      ast::MemberExpression::StaticMemberExpression(m) => (&m.object, m.property.name.as_str()),
+      ast::MemberExpression::ComputedMemberExpression(m) => {
+        let ast::Expression::StringLiteral(prop) = &m.expression else { return None };
+        (&m.object, prop.value.as_str())
+      }
+      ast::MemberExpression::PrivateFieldExpression(_) => return None,
+    };
+    if let ast::Expression::Identifier(ident) = object {
+      return self.try_inline_enum_member(ident, property_name);
+    }
+    // `ns.Direction.Up` — namespace-import resolution. Only for direct (non-chain)
+    // static access; the chained-namespace optional case isn't handled.
+    if !matches!(expr, ast::Expression::ChainExpression(_))
+      && let ast::MemberExpression::StaticMemberExpression(sm) = member
+    {
+      return self.try_inline_chained_enum_member(sm);
+    }
+    None
+  }
+
+  /// Try to inline an enum member access like `Direction.Up` → `0`.
+  /// Resolves the identifier to its canonical symbol, then looks up the enum member
+  /// value in the owning module's `enum_member_value_map`.
+  fn try_inline_enum_member(
+    &self,
+    ident: &ast::IdentifierReference<'_>,
+    property_name: &str,
+  ) -> Option<ast::Expression<'ast>> {
+    let ref_id = ident.reference_id.get()?;
+    let symbol_id = self.scope.scoping().get_reference(ref_id).symbol_id()?;
+    let symbol_ref: SymbolRef = (self.ctx.idx, symbol_id).into();
+    self.try_inline_enum_member_by_ref(symbol_ref, property_name)
+  }
+
+  /// Try to inline a chained enum member access like `ns.c.x` → `"c"`.
+  /// `ns` is a namespace import (`import * as ns`), `c` is a named export (enum), `x` is the member.
+  ///
+  /// This is separate from `try_rewrite_member_expr` because `resolved_member_expr_refs` resolves
+  /// `ns.c` → identifier `c` with `.x` as a remaining prop. The post-rewrite enum check only
+  /// matches `Identifier.property` patterns, so by the time `member_expr_or_ident_ref` rebuilds
+  /// `c.x`, the inlining window has passed. This method resolves all three levels in one pass.
+  fn try_inline_chained_enum_member(
+    &self,
+    outer_expr: &ast::StaticMemberExpression<'_>,
+  ) -> Option<ast::Expression<'ast>> {
+    // The object must be a StaticMemberExpression (e.g., `ns.c`)
+    let ast::Expression::StaticMemberExpression(inner_expr) = &outer_expr.object else {
+      return None;
+    };
+    // The inner object must be an identifier (e.g., `ns`)
+    let ast::Expression::Identifier(ns_ident) = &inner_expr.object else {
+      return None;
+    };
+
+    // Resolve `ns` to its symbol
+    let ref_id = ns_ident.reference_id.get()?;
+    let symbol_id = self.scope.scoping().get_reference(ref_id).symbol_id()?;
+    let symbol_ref: SymbolRef = (self.ctx.idx, symbol_id).into();
+    let canonical_ref = self.ctx.symbol_db.canonical_ref_for(symbol_ref);
+
+    // Find which module this namespace belongs to.
+    // For `import * as ns from './enums'`, canonical_ref.owner is the importee module.
+    let importee = self.ctx.modules[canonical_ref.owner].as_normal()?;
+
+    // Find the exported symbol for the inner property name (e.g., `c`)
+    let resolved_export = self.ctx.linking_infos[importee.idx]
+      .resolved_exports
+      .get(inner_expr.property.name.as_str())?;
+
+    // Don't inline when there are conflicting CJS sources — the value could differ per branch
+    if resolved_export.cjs_conflicting_symbol_refs.is_some() {
+      return None;
+    }
+
+    let canonical_export = self.ctx.symbol_db.canonical_ref_for(resolved_export.symbol_ref);
+
+    // Now try to inline the outer property (e.g., `x`) as an enum member
+    self.try_inline_enum_member_by_ref(canonical_export, outer_expr.property.name.as_str())
+  }
+
+  fn try_inline_enum_member_by_ref(
+    &self,
+    symbol_ref: SymbolRef,
+    property_name: &str,
+  ) -> Option<ast::Expression<'ast>> {
+    let canonical_ref = self.ctx.symbol_db.canonical_ref_for(symbol_ref);
+    let module = self.ctx.modules[canonical_ref.owner].as_normal()?;
+    let symbol_name = canonical_ref.name(self.ctx.symbol_db);
+    let member_map = module.ecma_view.enum_member_value_map.get(symbol_name)?;
+    let meta = member_map.get(property_name)?;
+    Some(meta.value.to_expression(AstBuilder::new(self.alloc)))
+  }
+
   fn var_declaration_to_expr_seq_and_bindings(
     &self,
     decl: &mut ast::VariableDeclaration<'ast>,
@@ -546,7 +780,7 @@ impl<'me, 'ast> ScopeHoistingFinalizer<'me, 'ast> {
     }
     let mut ret = vec![];
     let exprs = decl.declarations.iter_mut().filter_map(|var_decl| {
-      ret.extend(var_decl.id.binding_identifiers().iter().map(|item| item.name));
+      ret.extend(var_decl.id.get_binding_identifiers().iter().map(|item| item.name));
       // Turn `var ... = ...` to `... = ...`
       if let Some(ref mut init_expr) = var_decl.init {
         let left = var_decl.id.take_in(self.alloc).into_assignment_target(self.alloc);
@@ -1328,11 +1562,8 @@ impl<'me, 'ast> ScopeHoistingFinalizer<'me, 'ast> {
     let old_body = program.body.take_in(self.alloc);
     // the first statement info is the namespace variable declaration
     // skip first statement info to make sure `program.body` has same index as `stmt_infos`
-    old_body
-      .into_iter()
-      .enumerate()
-      .zip(self.ctx.module.stmt_infos.iter_enumerated().skip(1))
-      .for_each(|((_top_stmt_idx, mut top_stmt), (stmt_info_idx, _stmt_info))| {
+    old_body.into_iter().enumerate().zip(self.ctx.stmt_infos.iter_enumerated().skip(1)).for_each(
+      |((_top_stmt_idx, mut top_stmt), (stmt_info_idx, _stmt_info))| {
         let is_stmt_included = self.ctx.linking_info.stmt_info_included.has_bit(stmt_info_idx);
 
         if !is_stmt_included {
@@ -1385,6 +1616,12 @@ impl<'me, 'ast> ScopeHoistingFinalizer<'me, 'ast> {
             match &self.ctx.modules[module_idx] {
               Module::Normal(importee) => {
                 let importee_linking_info = &self.ctx.linking_infos[importee.idx];
+                if matches!(importee_linking_info.wrap_kind(), WrapKind::None)
+                  && let Some(init_stmt) = self.wrapped_esm_init_stmt_for_import_record(rec_idx)
+                {
+                  program.body.push(init_stmt);
+                }
+
                 if matches!(importee_linking_info.wrap_kind(), WrapKind::Esm)
                 // If it is a inner concatenated module, we should not call its wrapper here
                   && !matches!(
@@ -1394,7 +1631,13 @@ impl<'me, 'ast> ScopeHoistingFinalizer<'me, 'ast> {
                 {
                   let wrapper_ref_name =
                     self.canonical_name_for(importee_linking_info.wrapper_ref.unwrap());
-                  program.body.push(self.snippet.call_expr_stmt(wrapper_ref_name));
+                  let mut init_expr = self.snippet.call_expr_expr(wrapper_ref_name);
+                  if importee_linking_info.is_tla_or_contains_tla_dependency {
+                    init_expr = ast::Expression::AwaitExpression(
+                      self.snippet.builder.alloc_await_expression(SPAN, init_expr),
+                    );
+                  }
+                  program.body.push(self.snippet.builder.statement_expression(SPAN, init_expr));
                 }
 
                 match importee.exports_kind {
@@ -1653,7 +1896,8 @@ impl<'me, 'ast> ScopeHoistingFinalizer<'me, 'ast> {
         if is_module_decl {
           last_import_stmt_idx = Some(program.body.len());
         }
-      });
+      },
+    );
     last_import_stmt_idx.unwrap_or(0)
   }
 
